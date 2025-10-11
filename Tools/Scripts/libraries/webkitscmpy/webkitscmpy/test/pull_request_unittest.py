@@ -1,4 +1,4 @@
-# Copyright (C) 2021-2023 Apple Inc. All rights reserved.
+# Copyright (C) 2021-2025 Apple Inc. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -719,6 +719,67 @@ No pre-PR checks to run""")
                 "Updating pull-request for 'eng/pr-branch'...",
             ],
         )
+
+    def test_github_substring_branch(self):
+        # Test that a branch that is a substring of another branch doesn't match
+        # For example, 'eng/Adopt-LIFETIME_BOUND-for-WTF-Ref' should not match
+        # a closed PR with branch 'eng/Adopt-LIFETIME_BOUND-for-WTF-RefPtr'
+        with mocks.remote.GitHub() as remote, mocks.local.Git(
+            self.path, remote='https://{}'.format(remote.remote),
+            remotes=dict(fork='https://{}/Contributor/WebKit'.format(remote.hosts[0])),
+        ) as repo, mocks.local.Svn(), patch('webkitbugspy.Tracker._trackers', []):
+            # First create a PR with the longer branch name
+            with OutputCapture():
+                repo.commits['eng/Adopt-LIFETIME_BOUND-for-WTF-RefPtr'] = [
+                    repo.commits[repo.default_branch][-1],
+                    Commit(
+                        hash='06de5d56554e693db72313f4ca1fb969c30b8ccb',
+                        branch='eng/Adopt-LIFETIME_BOUND-for-WTF-RefPtr',
+                        author=dict(name='Tim Contributor', emails=['tcontributor@example.com']),
+                        identifier="5.1@eng/Adopt-LIFETIME_BOUND-for-WTF-RefPtr",
+                        timestamp=int(time.time()),
+                        message='Adopt LIFETIME_BOUND for WTF::RefPtr',
+                    )
+                ]
+                repo.head = repo.commits['eng/Adopt-LIFETIME_BOUND-for-WTF-RefPtr'][-1]
+                self.assertEqual(0, program.main(
+                    args=('pull-request', '--no-history'),
+                    path=self.path,
+                ))
+
+            # Close the first PR
+            local.Git(self.path).remote().pull_requests.get(1).close()
+            self.assertFalse(local.Git(self.path).remote().pull_requests.get(1).opened)
+
+            # Now create a new branch with a name that is a substring of the closed PR's branch
+            # WITHOUT the fix, this will incorrectly match the closed PR
+            with OutputCapture(level=logging.INFO) as captured, MockTerminal.input('y'):
+                repo.commits['eng/Adopt-LIFETIME_BOUND-for-WTF-Ref'] = [
+                    repo.commits[repo.default_branch][-1],
+                    Commit(
+                        hash='a30ce8494bf1cd2a1f4e0b11c1d3d7d0c2b4e6c8',
+                        branch='eng/Adopt-LIFETIME_BOUND-for-WTF-Ref',
+                        author=dict(name='Tim Contributor', emails=['tcontributor@example.com']),
+                        identifier="5.1@eng/Adopt-LIFETIME_BOUND-for-WTF-Ref",
+                        timestamp=int(time.time()),
+                        message='Adopt LIFETIME_BOUND for WTF::Ref',
+                    )
+                ]
+                repo.head = repo.commits['eng/Adopt-LIFETIME_BOUND-for-WTF-Ref'][-1]
+                self.assertEqual(0, program.main(
+                    args=('pull-request', '-v', '--no-history'),
+                    path=self.path,
+                ))
+
+            # The new PR should be created as PR #2, not mistaken for the closed PR #1
+            self.assertEqual(local.Git(self.path).remote().pull_requests.get(2).head, 'eng/Adopt-LIFETIME_BOUND-for-WTF-Ref')
+
+        # Verify that no error message about "already associated" was shown
+        # This is the bug: the old code incorrectly matches closed PRs with substring branch names
+        self.assertNotIn('is already associated with', captured.stdout.getvalue())
+        self.assertEqual(captured.stderr.getvalue(), '')
+        # Verify that a new PR was created
+        self.assertIn("Created 'PR 2", captured.stdout.getvalue())
 
     def test_github_bugzilla(self):
         with OutputCapture(level=logging.INFO) as captured, mocks.remote.GitHub(projects=bmocks.PROJECTS) as remote, bmocks.Bugzilla(
